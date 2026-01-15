@@ -1,0 +1,30 @@
+# The groupName is used to avoid naming conflicts on the Kubernetes API.
+# Set this to a unique domain that you own.
+# This name will be referenced in each Issuer's `webhook` stanza.
+groupName: acme.example.com
+
+certManager:
+  namespace: cert-manager
+  serviceAccountName: cert-manager
+
+image:
+  repository: ghcr.io/greatliontech/cert-manager-webhook-mindns
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 443
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

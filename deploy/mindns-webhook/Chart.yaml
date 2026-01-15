@@ -1,0 +1,5 @@
+apiVersion: v2
+appVersion: "0.1.0"
+description: A cert-manager webhook for mindns DNS provider
+name: mindns-webhook
+version: 0.1.0

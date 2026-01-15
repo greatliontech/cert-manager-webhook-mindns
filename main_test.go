@@ -1,41 +1,96 @@
 package main
 
 import (
-	"os"
 	"testing"
 
-	acmetest "github.com/cert-manager/cert-manager/test/acme"
-
-	"github.com/cert-manager/webhook-example/example"
+	"github.com/stretchr/testify/assert"
+	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
-var (
-	zone = os.Getenv("TEST_ZONE_NAME")
-)
+func TestMindnsSolver_Name(t *testing.T) {
+	solver := &mindnsSolver{}
+	assert.Equal(t, "mindns", solver.Name())
+}
 
-func TestRunsSuite(t *testing.T) {
-	// The manifest path should contain a file named config.json that is a
-	// snippet of valid configuration that should be included on the
-	// ChallengeRequest passed as part of the test cases.
-	//
+func TestLoadConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    *extapi.JSON
+		want    mindnsConfig
+		wantErr bool
+	}{
+		{
+			name: "nil config",
+			json: nil,
+			want: mindnsConfig{},
+		},
+		{
+			name: "empty config",
+			json: &extapi.JSON{Raw: []byte(`{}`)},
+			want: mindnsConfig{},
+		},
+		{
+			name: "full config",
+			json: &extapi.JSON{Raw: []byte(`{"serverAddr":"mindns.default.svc:50051","zone":"example.com."}`)},
+			want: mindnsConfig{
+				ServerAddr: "mindns.default.svc:50051",
+				Zone:       "example.com.",
+			},
+		},
+		{
+			name: "server only",
+			json: &extapi.JSON{Raw: []byte(`{"serverAddr":"localhost:50051"}`)},
+			want: mindnsConfig{
+				ServerAddr: "localhost:50051",
+			},
+		},
+		{
+			name:    "invalid json",
+			json:    &extapi.JSON{Raw: []byte(`{invalid}`)},
+			wantErr: true,
+		},
+	}
 
-	// Uncomment the below fixture when implementing your custom DNS provider
-	//fixture := acmetest.NewFixture(&customDNSProviderSolver{},
-	//	acmetest.SetResolvedZone(zone),
-	//	acmetest.SetAllowAmbientCredentials(false),
-	//	acmetest.SetManifestPath("testdata/my-custom-solver"),
-	//	acmetest.SetBinariesPath("_test/kubebuilder/bin"),
-	//)
-	solver := example.New("59351")
-	fixture := acmetest.NewFixture(solver,
-		acmetest.SetResolvedZone("example.com."),
-		acmetest.SetManifestPath("testdata/my-custom-solver"),
-		acmetest.SetDNSServer("127.0.0.1:59351"),
-		acmetest.SetUseAuthoritative(false),
-	)
-	//need to uncomment and  RunConformance delete runBasic and runExtended once https://github.com/cert-manager/cert-manager/pull/4835 is merged
-	//fixture.RunConformance(t)
-	fixture.RunBasic(t)
-	fixture.RunExtended(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := loadConfig(tt.json)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
 
+func TestExtractZone(t *testing.T) {
+	tests := []struct {
+		name         string
+		resolvedZone string
+		want         string
+	}{
+		{
+			name:         "with trailing dot",
+			resolvedZone: "example.com.",
+			want:         "example.com.",
+		},
+		{
+			name:         "without trailing dot",
+			resolvedZone: "example.com",
+			want:         "example.com.",
+		},
+		{
+			name:         "subdomain with dot",
+			resolvedZone: "sub.example.com.",
+			want:         "sub.example.com.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractZone(tt.resolvedZone)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

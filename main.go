@@ -1,15 +1,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
+	"sync"
+	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/rest"
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
+	"github.com/greatliontech/mindns/pkg/mindnspb"
 )
 
 var GroupName = os.Getenv("GROUP_NAME")
@@ -19,128 +27,294 @@ func main() {
 		panic("GROUP_NAME must be specified")
 	}
 
-	// This will register our custom DNS provider with the webhook serving
-	// library, making it available as an API under the provided GroupName.
-	// You can register multiple DNS provider implementations with a single
-	// webhook, where the Name() method will be used to disambiguate between
-	// the different implementations.
-	cmd.RunWebhookServer(GroupName,
-		&customDNSProviderSolver{},
-	)
+	cmd.RunWebhookServer(GroupName, &mindnsSolver{})
 }
 
-// customDNSProviderSolver implements the provider-specific logic needed to
-// 'present' an ACME challenge TXT record for your own DNS provider.
-// To do so, it must implement the `github.com/cert-manager/cert-manager/pkg/acme/webhook.Solver`
-// interface.
-type customDNSProviderSolver struct {
-	// If a Kubernetes 'clientset' is needed, you must:
-	// 1. uncomment the additional `client` field in this structure below
-	// 2. uncomment the "k8s.io/client-go/kubernetes" import at the top of the file
-	// 3. uncomment the relevant code in the Initialize method below
-	// 4. ensure your webhook's service account has the required RBAC role
-	//    assigned to it for interacting with the Kubernetes APIs you need.
-	//client kubernetes.Clientset
+// mindnsSolver implements the cert-manager DNS01 solver interface
+// using mindns as the DNS provider.
+type mindnsSolver struct {
+	mu     sync.RWMutex
+	client mindnspb.MindnsServiceClient
+	conn   *grpc.ClientConn
 }
 
-// customDNSProviderConfig is a structure that is used to decode into when
-// solving a DNS01 challenge.
-// This information is provided by cert-manager, and may be a reference to
-// additional configuration that's needed to solve the challenge for this
-// particular certificate or issuer.
-// This typically includes references to Secret resources containing DNS
-// provider credentials, in cases where a 'multi-tenant' DNS solver is being
-// created.
-// If you do *not* require per-issuer or per-certificate configuration to be
-// provided to your webhook, you can skip decoding altogether in favour of
-// using CLI flags or similar to provide configuration.
-// You should not include sensitive information here. If credentials need to
-// be used by your provider here, you should reference a Kubernetes Secret
-// resource and fetch these credentials using a Kubernetes clientset.
-type customDNSProviderConfig struct {
-	// Change the two fields below according to the format of the configuration
-	// to be decoded.
-	// These fields will be set by users in the
-	// `issuer.spec.acme.dns01.providers.webhook.config` field.
+// mindnsConfig is the configuration for the mindns solver.
+// Users configure this in their Issuer/ClusterIssuer webhook config.
+type mindnsConfig struct {
+	// ServerAddr is the address of the mindns gRPC server (e.g., "mindns.default.svc:50051")
+	ServerAddr string `json:"serverAddr"`
 
-	//Email           string `json:"email"`
-	//APIKeySecretRef v1alpha1.SecretKeySelector `json:"apiKeySecretRef"`
+	// Zone is the DNS zone to manage (e.g., "example.com.")
+	// If not specified, it will be derived from the challenge domain.
+	Zone string `json:"zone,omitempty"`
 }
 
-// Name is used as the name for this DNS solver when referencing it on the ACME
-// Issuer resource.
-// This should be unique **within the group name**, i.e. you can have two
-// solvers configured with the same Name() **so long as they do not co-exist
-// within a single webhook deployment**.
-// For example, `cloudflare` may be used as the name of a solver.
-func (c *customDNSProviderSolver) Name() string {
-	return "my-custom-solver"
+// Name returns the solver name used in Issuer configurations.
+func (s *mindnsSolver) Name() string {
+	return "mindns"
 }
 
-// Present is responsible for actually presenting the DNS record with the
-// DNS provider.
-// This method should tolerate being called multiple times with the same value.
-// cert-manager itself will later perform a self check to ensure that the
-// solver has correctly configured the DNS provider.
-func (c *customDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
+// Present creates a TXT record for the ACME DNS01 challenge.
+func (s *mindnsSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	cfg, err := loadConfig(ch.Config)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// TODO: do something more useful with the decoded configuration
-	fmt.Printf("Decoded configuration %v", cfg)
+	client, err := s.getClient(cfg.ServerAddr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to mindns: %w", err)
+	}
 
-	// TODO: add code that sets a record in the DNS provider's console
+	// Determine the zone
+	zone := cfg.Zone
+	if zone == "" {
+		zone = extractZone(ch.ResolvedZone)
+	}
+
+	// The challenge record name (e.g., "_acme-challenge.www.example.com.")
+	recordName := ch.ResolvedFQDN
+
+	// First, try to get existing TXT records to append
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	getReq := &mindnspb.GetRRsetRequest{}
+	getReq.SetZone(zone)
+	getReq.SetName(recordName)
+	getReq.SetType(mindnspb.Type_TypeTXT)
+
+	existing, err := client.GetRRset(ctx, getReq)
+
+	var records []*mindnspb.TXT
+	if err == nil && existing != nil {
+		// Parse existing records
+		for _, any := range existing.GetRecords() {
+			prr, err := mindnspb.ProtoRRFromAny(any)
+			if err != nil {
+				continue
+			}
+			if existingTxt, ok := prr.(*mindnspb.TXT); ok {
+				// Check if this key already exists
+				if existingTxt.GetData() != nil {
+					if slices.Contains(existingTxt.GetData().GetTxt(), ch.Key) {
+						// Already present, nothing to do
+						return nil
+					}
+				}
+				records = append(records, existingTxt)
+			}
+		}
+	}
+
+	// Create new TXT record with the challenge key
+	txt := &mindnspb.TXT{}
+	hdr := &mindnspb.RR_Header{}
+	hdr.SetName(recordName)
+	hdr.SetTtl(60)
+	txt.SetHdr(hdr)
+	data := &mindnspb.TXTData{}
+	data.SetTxt([]string{ch.Key})
+	txt.SetData(data)
+
+	// Add our new record
+	records = append(records, txt)
+
+	// Build RRset
+	rrset := &mindnspb.RRset{}
+	rrset.SetName(recordName)
+	rrset.SetType(mindnspb.Type_TypeTXT)
+	rrset.SetTtl(60)
+
+	// Convert to Any
+	anyRecords, err := mindnspb.ProtoRRsToAny(toProtoRRSlice(records))
+	if err != nil {
+		return fmt.Errorf("failed to convert records: %w", err)
+	}
+	rrset.SetRecords(anyRecords)
+
+	// Set the RRset
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+
+	setReq := &mindnspb.SetRRsetRequest{}
+	setReq.SetZone(zone)
+	setReq.SetRrset(rrset)
+
+	_, err = client.SetRRset(ctx2, setReq)
+	if err != nil {
+		return fmt.Errorf("failed to set TXT record: %w", err)
+	}
+
 	return nil
 }
 
-// CleanUp should delete the relevant TXT record from the DNS provider console.
-// If multiple TXT records exist with the same record name (e.g.
-// _acme-challenge.example.com) then **only** the record with the same `key`
-// value provided on the ChallengeRequest should be cleaned up.
-// This is in order to facilitate multiple DNS validations for the same domain
-// concurrently.
-func (c *customDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
-	// TODO: add code that deletes a record from the DNS provider's console
+// CleanUp removes the TXT record for the ACME DNS01 challenge.
+func (s *mindnsSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
+	cfg, err := loadConfig(ch.Config)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	client, err := s.getClient(cfg.ServerAddr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to mindns: %w", err)
+	}
+
+	zone := cfg.Zone
+	if zone == "" {
+		zone = extractZone(ch.ResolvedZone)
+	}
+
+	recordName := ch.ResolvedFQDN
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Get existing TXT records
+	getReq := &mindnspb.GetRRsetRequest{}
+	getReq.SetZone(zone)
+	getReq.SetName(recordName)
+	getReq.SetType(mindnspb.Type_TypeTXT)
+
+	existing, err := client.GetRRset(ctx, getReq)
+	if err != nil {
+		// Record doesn't exist, nothing to clean up
+		return nil
+	}
+
+	// Filter out the record with our key
+	var remaining []*mindnspb.TXT
+	for _, any := range existing.GetRecords() {
+		prr, err := mindnspb.ProtoRRFromAny(any)
+		if err != nil {
+			continue
+		}
+		if txt, ok := prr.(*mindnspb.TXT); ok {
+			// Check if this is our record
+			isOurs := false
+			if txt.GetData() != nil {
+				for _, t := range txt.GetData().GetTxt() {
+					if t == ch.Key {
+						isOurs = true
+						break
+					}
+				}
+			}
+			if !isOurs {
+				remaining = append(remaining, txt)
+			}
+		}
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+
+	if len(remaining) == 0 {
+		// No records left, delete the RRset
+		delReq := &mindnspb.DeleteRRsetRequest{}
+		delReq.SetZone(zone)
+		delReq.SetName(recordName)
+		delReq.SetType(mindnspb.Type_TypeTXT)
+
+		_, err = client.DeleteRRset(ctx2, delReq)
+		if err != nil {
+			return fmt.Errorf("failed to delete TXT record: %w", err)
+		}
+	} else {
+		// Update with remaining records
+		rrset := &mindnspb.RRset{}
+		rrset.SetName(recordName)
+		rrset.SetType(mindnspb.Type_TypeTXT)
+		rrset.SetTtl(60)
+
+		anyRecords, err := mindnspb.ProtoRRsToAny(toProtoRRSlice(remaining))
+		if err != nil {
+			return fmt.Errorf("failed to convert records: %w", err)
+		}
+		rrset.SetRecords(anyRecords)
+
+		setReq := &mindnspb.SetRRsetRequest{}
+		setReq.SetZone(zone)
+		setReq.SetRrset(rrset)
+
+		_, err = client.SetRRset(ctx2, setReq)
+		if err != nil {
+			return fmt.Errorf("failed to update TXT records: %w", err)
+		}
+	}
+
 	return nil
 }
 
-// Initialize will be called when the webhook first starts.
-// This method can be used to instantiate the webhook, i.e. initialising
-// connections or warming up caches.
-// Typically, the kubeClientConfig parameter is used to build a Kubernetes
-// client that can be used to fetch resources from the Kubernetes API, e.g.
-// Secret resources containing credentials used to authenticate with DNS
-// provider accounts.
-// The stopCh can be used to handle early termination of the webhook, in cases
-// where a SIGTERM or similar signal is sent to the webhook process.
-func (c *customDNSProviderSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan struct{}) error {
-	///// UNCOMMENT THE BELOW CODE TO MAKE A KUBERNETES CLIENTSET AVAILABLE TO
-	///// YOUR CUSTOM DNS PROVIDER
-
-	//cl, err := kubernetes.NewForConfig(kubeClientConfig)
-	//if err != nil {
-	//	return err
-	//}
-	//
-	//c.client = cl
-
-	///// END OF CODE TO MAKE KUBERNETES CLIENTSET AVAILABLE
+// Initialize is called when the webhook starts.
+func (s *mindnsSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan struct{}) error {
+	// Connection is established lazily in getClient
 	return nil
 }
 
-// loadConfig is a small helper function that decodes JSON configuration into
-// the typed config struct.
-func loadConfig(cfgJSON *extapi.JSON) (customDNSProviderConfig, error) {
-	cfg := customDNSProviderConfig{}
-	// handle the 'base case' where no configuration has been provided
+// getClient returns a gRPC client for the given server address.
+func (s *mindnsSolver) getClient(serverAddr string) (mindnspb.MindnsServiceClient, error) {
+	s.mu.RLock()
+	if s.client != nil && s.conn != nil {
+		s.mu.RUnlock()
+		return s.client, nil
+	}
+	s.mu.RUnlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if s.client != nil && s.conn != nil {
+		return s.client, nil
+	}
+
+	// Close existing connection if any
+	if s.conn != nil {
+		s.conn.Close()
+	}
+
+	conn, err := grpc.NewClient(serverAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %w", serverAddr, err)
+	}
+
+	s.conn = conn
+	s.client = mindnspb.NewMindnsServiceClient(conn)
+
+	return s.client, nil
+}
+
+// loadConfig decodes the webhook configuration.
+func loadConfig(cfgJSON *extapi.JSON) (mindnsConfig, error) {
+	cfg := mindnsConfig{}
 	if cfgJSON == nil {
 		return cfg, nil
 	}
 	if err := json.Unmarshal(cfgJSON.Raw, &cfg); err != nil {
-		return cfg, fmt.Errorf("error decoding solver config: %v", err)
+		return cfg, fmt.Errorf("error decoding solver config: %w", err)
 	}
-
 	return cfg, nil
+}
+
+// extractZone extracts the zone from the resolved zone string.
+// cert-manager provides this as "example.com." format.
+func extractZone(resolvedZone string) string {
+	// Ensure it ends with a dot
+	if !strings.HasSuffix(resolvedZone, ".") {
+		return resolvedZone + "."
+	}
+	return resolvedZone
+}
+
+// toProtoRRSlice converts []*mindnspb.TXT to []mindnspb.ProtoRR
+func toProtoRRSlice(txts []*mindnspb.TXT) []mindnspb.ProtoRR {
+	result := make([]mindnspb.ProtoRR, len(txts))
+	for i, txt := range txts {
+		result[i] = txt
+	}
+	return result
 }
