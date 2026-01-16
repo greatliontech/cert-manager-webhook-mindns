@@ -31,6 +31,16 @@ spec:
           env:
             - name: GROUP_NAME
               value: {{ .Values.groupName | quote }}
+            {{- if .Values.mindns.tokenSecretRef.name }}
+            - name: MINDNS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mindns.tokenSecretRef.name }}
+                  key: {{ .Values.mindns.tokenSecretRef.key | default "token" }}
+            {{- else if .Values.mindns.token }}
+            - name: MINDNS_TOKEN
+              value: {{ .Values.mindns.token | quote }}
+            {{- end }}
           ports:
             - name: https
               containerPort: 443

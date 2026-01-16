@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+vars:
+  BINARY_NAME: webhook
+  IMAGE_NAME: cert-manager-webhook-mindns
+  IMAGE_REGISTRY: ghcr.io/greatliontech
+  CHART_PATH: deploy/mindns-webhook
+
+tasks:
+  default:
+    desc: Help (this message)
+    cmds:
+      - task -l
+    silent: true
+
+  build:
+    desc: Build the binary
+    cmds:
+      - go build -o {{.BINARY_NAME}} .
+    silent: true
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test -v ./...
+    silent: true
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run
+    silent: true
+
+  tidy:
+    desc: Run go mod tidy
+    cmds:
+      - go mod tidy
+    silent: true
+
+  docker-build:
+    desc: Build Docker image
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker build -t {{.IMAGE_REGISTRY}}/{{.IMAGE_NAME}}:{{.TAG}} .
+    silent: true
+
+  docker-push:
+    desc: Push Docker image
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker push {{.IMAGE_REGISTRY}}/{{.IMAGE_NAME}}:{{.TAG}}
+    silent: true
+
+  helm-lint:
+    desc: Lint Helm chart
+    cmds:
+      - helm lint {{.CHART_PATH}}
+    silent: true
+
+  helm-template:
+    desc: Render Helm chart templates
+    cmds:
+      - helm template {{.CHART_PATH}}
+    silent: true
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -f {{.BINARY_NAME}}
+    silent: true

@@ -1,0 +1,39 @@
+name: Helm
+
+on:
+  release:
+    types: [published]
+
+env:
+  CHART_PATH: deploy/mindns-webhook
+  REGISTRY: ghcr.io
+  REGISTRY_REPO: greatliontech
+
+jobs:
+  helm-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Get chart name from Chart.yaml
+        id: chart
+        run: |
+          echo "name=$(yq '.name' ${{ env.CHART_PATH }}/Chart.yaml)" >> $GITHUB_OUTPUT
+
+      - name: Update appVersion
+        run: |
+          yq -i '.appVersion = "${{ github.event.release.tag_name }}"' ${{ env.CHART_PATH }}/Chart.yaml
+
+      - name: Push Helm chart
+        uses: appany/helm-oci-chart-releaser@v0.5.0
+        with:
+          name: ${{ steps.chart.outputs.name }}
+          repository: ${{ env.REGISTRY_REPO }}
+          tag: ${{ github.event.release.tag_name }}
+          path: ${{ env.CHART_PATH }}
+          registry: ${{ env.REGISTRY }}
+          registry_username: ${{ github.actor }}
+          registry_password: ${{ secrets.GITHUB_TOKEN }}

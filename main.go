@@ -20,6 +20,21 @@ import (
 	"github.com/greatliontech/mindns/pkg/mindnspb"
 )
 
+// bearerAuth implements grpc.PerRPCCredentials for bearer token authentication.
+type bearerAuth struct {
+	token string
+}
+
+func (b bearerAuth) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+	return map[string]string{
+		"authorization": "Bearer " + b.token,
+	}, nil
+}
+
+func (b bearerAuth) RequireTransportSecurity() bool {
+	return false
+}
+
 var GroupName = os.Getenv("GROUP_NAME")
 
 func main() {
@@ -33,9 +48,11 @@ func main() {
 // mindnsSolver implements the cert-manager DNS01 solver interface
 // using mindns as the DNS provider.
 type mindnsSolver struct {
-	mu     sync.RWMutex
-	client mindnspb.MindnsServiceClient
-	conn   *grpc.ClientConn
+	mu         sync.RWMutex
+	client     mindnspb.MindnsServiceClient
+	conn       *grpc.ClientConn
+	serverAddr string
+	token      string
 }
 
 // mindnsConfig is the configuration for the mindns solver.
@@ -47,6 +64,10 @@ type mindnsConfig struct {
 	// Zone is the DNS zone to manage (e.g., "example.com.")
 	// If not specified, it will be derived from the challenge domain.
 	Zone string `json:"zone,omitempty"`
+
+	// Token is the optional bearer token for authentication.
+	// If not specified, falls back to MINDNS_TOKEN environment variable.
+	Token string `json:"token,omitempty"`
 }
 
 // Name returns the solver name used in Issuer configurations.
@@ -61,7 +82,7 @@ func (s *mindnsSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	client, err := s.getClient(cfg.ServerAddr)
+	client, err := s.getClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to connect to mindns: %w", err)
 	}
@@ -156,7 +177,7 @@ func (s *mindnsSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	client, err := s.getClient(cfg.ServerAddr)
+	client, err := s.getClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to connect to mindns: %w", err)
 	}
@@ -253,10 +274,16 @@ func (s *mindnsSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan s
 	return nil
 }
 
-// getClient returns a gRPC client for the given server address.
-func (s *mindnsSolver) getClient(serverAddr string) (mindnspb.MindnsServiceClient, error) {
+// getClient returns a gRPC client for the given server address and optional token.
+func (s *mindnsSolver) getClient(cfg mindnsConfig) (mindnspb.MindnsServiceClient, error) {
+	// Resolve token: config takes precedence over env var
+	token := cfg.Token
+	if token == "" {
+		token = os.Getenv("MINDNS_TOKEN")
+	}
+
 	s.mu.RLock()
-	if s.client != nil && s.conn != nil {
+	if s.client != nil && s.conn != nil && s.serverAddr == cfg.ServerAddr && s.token == token {
 		s.mu.RUnlock()
 		return s.client, nil
 	}
@@ -266,7 +293,7 @@ func (s *mindnsSolver) getClient(serverAddr string) (mindnspb.MindnsServiceClien
 	defer s.mu.Unlock()
 
 	// Double-check after acquiring write lock
-	if s.client != nil && s.conn != nil {
+	if s.client != nil && s.conn != nil && s.serverAddr == cfg.ServerAddr && s.token == token {
 		return s.client, nil
 	}
 
@@ -275,14 +302,23 @@ func (s *mindnsSolver) getClient(serverAddr string) (mindnspb.MindnsServiceClien
 		s.conn.Close()
 	}
 
-	conn, err := grpc.NewClient(serverAddr,
+	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	}
+
+	// Add bearer auth if token is configured
+	if token != "" {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerAuth{token: token}))
+	}
+
+	conn, err := grpc.NewClient(cfg.ServerAddr, dialOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to %s: %w", serverAddr, err)
+		return nil, fmt.Errorf("failed to connect to %s: %w", cfg.ServerAddr, err)
 	}
 
 	s.conn = conn
+	s.serverAddr = cfg.ServerAddr
+	s.token = token
 	s.client = mindnspb.NewMindnsServiceClient(conn)
 
 	return s.client, nil
