@@ -30,7 +30,7 @@ tasks:
         TEST_ASSET_ETCD=_test/kubebuilder/etcd \
         TEST_ASSET_KUBE_APISERVER=_test/kubebuilder/kube-apiserver \
         TEST_ASSET_KUBECTL=_test/kubebuilder/kubectl \
-        go test -v -run TestConformance ./...
+        go test -v ./...
     silent: true
 
   fetch-test-binaries:
