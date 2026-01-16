@@ -12,7 +12,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
@@ -49,6 +51,9 @@ type mindnsSolver struct {
 	conn       *grpc.ClientConn
 	serverAddr string
 	token      string
+
+	// K8s client for fetching secrets
+	k8sClient kubernetes.Interface
 }
 
 // mindnsConfig is the configuration for the mindns solver.
@@ -61,9 +66,17 @@ type mindnsConfig struct {
 	// If not specified, it will be derived from the challenge domain.
 	Zone string `json:"zone,omitempty"`
 
-	// Token is the optional bearer token for authentication.
-	// If not specified, falls back to MINDNS_TOKEN environment variable.
-	Token string `json:"token,omitempty"`
+	// TokenSecretRef references a Kubernetes Secret containing the bearer token.
+	// The secret must be in the same namespace as the Issuer (or cluster-wide for ClusterIssuer).
+	TokenSecretRef *secretRef `json:"tokenSecretRef,omitempty"`
+}
+
+// secretRef references a key in a Kubernetes Secret.
+type secretRef struct {
+	// Name is the name of the Secret.
+	Name string `json:"name"`
+	// Key is the key in the Secret data (defaults to "token").
+	Key string `json:"key,omitempty"`
 }
 
 // Name returns the solver name used in Issuer configurations.
@@ -78,7 +91,7 @@ func (s *mindnsSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	client, err := s.getClient(cfg)
+	client, err := s.getClient(cfg, ch.ResourceNamespace)
 	if err != nil {
 		return fmt.Errorf("failed to connect to mindns: %w", err)
 	}
@@ -128,6 +141,8 @@ func (s *mindnsSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	txt := &mindnspb.TXT{}
 	hdr := &mindnspb.RR_Header{}
 	hdr.SetName(recordName)
+	hdr.SetRrtype(uint32(mindnspb.Type_TypeTXT))
+	hdr.SetClass(1) // IN (Internet)
 	hdr.SetTtl(60)
 	txt.SetHdr(hdr)
 	data := &mindnspb.TXTData{}
@@ -173,7 +188,7 @@ func (s *mindnsSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	client, err := s.getClient(cfg)
+	client, err := s.getClient(cfg, ch.ResourceNamespace)
 	if err != nil {
 		return fmt.Errorf("failed to connect to mindns: %w", err)
 	}
@@ -266,16 +281,22 @@ func (s *mindnsSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 
 // Initialize is called when the webhook starts.
 func (s *mindnsSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan struct{}) error {
-	// Connection is established lazily in getClient
+	if kubeClientConfig != nil {
+		client, err := kubernetes.NewForConfig(kubeClientConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create kubernetes client: %w", err)
+		}
+		s.k8sClient = client
+	}
 	return nil
 }
 
-// getClient returns a gRPC client for the given server address and optional token.
-func (s *mindnsSolver) getClient(cfg mindnsConfig) (mindnspb.MindnsServiceClient, error) {
-	// Resolve token: config takes precedence over env var
-	token := cfg.Token
-	if token == "" {
-		token = os.Getenv("MINDNS_TOKEN")
+// getClient returns a gRPC client for the given configuration.
+func (s *mindnsSolver) getClient(cfg mindnsConfig, namespace string) (mindnspb.MindnsServiceClient, error) {
+	// Resolve token from secret or environment
+	token, err := s.resolveToken(cfg, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve token: %w", err)
 	}
 
 	s.mu.RLock()
@@ -318,6 +339,39 @@ func (s *mindnsSolver) getClient(cfg mindnsConfig) (mindnspb.MindnsServiceClient
 	s.client = mindnspb.NewMindnsServiceClient(conn)
 
 	return s.client, nil
+}
+
+// resolveToken fetches the token from the K8s Secret or falls back to env var.
+func (s *mindnsSolver) resolveToken(cfg mindnsConfig, namespace string) (string, error) {
+	// If tokenSecretRef is configured, fetch from K8s Secret
+	if cfg.TokenSecretRef != nil && cfg.TokenSecretRef.Name != "" {
+		if s.k8sClient == nil {
+			return "", fmt.Errorf("kubernetes client not initialized but tokenSecretRef is configured")
+		}
+
+		key := cfg.TokenSecretRef.Key
+		if key == "" {
+			key = "token" // default key
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		secret, err := s.k8sClient.CoreV1().Secrets(namespace).Get(ctx, cfg.TokenSecretRef.Name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("failed to get secret %s/%s: %w", namespace, cfg.TokenSecretRef.Name, err)
+		}
+
+		tokenBytes, ok := secret.Data[key]
+		if !ok {
+			return "", fmt.Errorf("key %q not found in secret %s/%s", key, namespace, cfg.TokenSecretRef.Name)
+		}
+
+		return string(tokenBytes), nil
+	}
+
+	// Fall back to environment variable
+	return os.Getenv("MINDNS_TOKEN"), nil
 }
 
 // loadConfig decodes the webhook configuration.

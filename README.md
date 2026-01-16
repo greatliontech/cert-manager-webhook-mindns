@@ -17,8 +17,7 @@ helm install mindns-webhook oci://ghcr.io/greatliontech/mindns-webhook-helm-char
 |-----------|-------------|---------|
 | `image.repository` | Image repository | `ghcr.io/greatliontech/cert-manager-webhook-mindns` |
 | `image.tag` | Image tag | `latest` |
-| `mindns.token` | Bearer token for mindns authentication | `""` |
-| `mindns.tokenSecretRef.name` | Secret name containing the token | `""` |
+| `mindns.tokenSecretRef.name` | Secret name for default MINDNS_TOKEN env var | `""` |
 | `mindns.tokenSecretRef.key` | Key in secret containing the token | `token` |
 
 ## Usage
@@ -44,7 +43,22 @@ spec:
             config:
               serverAddr: "mindns.default.svc:50051"
               # zone: "example.com."  # optional, derived from challenge if omitted
-              # token: "secret"       # optional, can also use MINDNS_TOKEN env var
+              tokenSecretRef:         # optional, for authenticated mindns
+                name: mindns-token
+                key: token            # defaults to "token" if omitted
+```
+
+Create the token secret in the same namespace as your Issuer (or any namespace for ClusterIssuer):
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mindns-token
+  namespace: cert-manager
+type: Opaque
+stringData:
+  token: "your-mindns-token"
 ```
 
 ## Development

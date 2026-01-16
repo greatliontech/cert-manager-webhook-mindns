@@ -22,9 +22,37 @@ tasks:
     silent: true
 
   test:
-    desc: Run tests
+    desc: Run conformance tests
+    deps: [fetch-test-binaries]
     cmds:
-      - go test -v ./...
+      - |
+        CONFORMANCE_TEST=1 \
+        TEST_ASSET_ETCD=_test/kubebuilder/etcd \
+        TEST_ASSET_KUBE_APISERVER=_test/kubebuilder/kube-apiserver \
+        TEST_ASSET_KUBECTL=_test/kubebuilder/kubectl \
+        go test -v -run TestConformance ./...
+    silent: true
+
+  fetch-test-binaries:
+    desc: Download kubebuilder test binaries
+    vars:
+      KUBEBUILDER_VERSION: "1.28.0"
+      OS:
+        sh: go env GOOS
+      ARCH:
+        sh: go env GOARCH
+    cmds:
+      - mkdir -p _test/kubebuilder
+      - |
+        if [ ! -f _test/kubebuilder/etcd ]; then
+          curl -fsSL https://go.kubebuilder.io/test-tools/{{.KUBEBUILDER_VERSION}}/{{.OS}}/{{.ARCH}} -o _test/kubebuilder.tar.gz
+          tar xfO _test/kubebuilder.tar.gz kubebuilder/bin/etcd > _test/kubebuilder/etcd && chmod +x _test/kubebuilder/etcd
+          tar xfO _test/kubebuilder.tar.gz kubebuilder/bin/kube-apiserver > _test/kubebuilder/kube-apiserver && chmod +x _test/kubebuilder/kube-apiserver
+          tar xfO _test/kubebuilder.tar.gz kubebuilder/bin/kubectl > _test/kubebuilder/kubectl && chmod +x _test/kubebuilder/kubectl
+          rm _test/kubebuilder.tar.gz
+        fi
+    status:
+      - test -f _test/kubebuilder/etcd
     silent: true
 
   lint:

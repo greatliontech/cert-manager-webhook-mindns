@@ -16,12 +16,9 @@ service:
   type: ClusterIP
   port: 443
 
-# Optional token authentication for mindns
-# Can be set directly or via a secret reference
+# Optional default token for mindns (used if Issuer doesn't specify tokenSecretRef)
+# Reference an existing secret to set MINDNS_TOKEN environment variable
 mindns:
-  # Set the token directly (not recommended for production)
-  token: ""
-  # Or reference an existing secret
   tokenSecretRef:
     # Name of the secret containing the token
     name: ""

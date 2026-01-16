@@ -28,17 +28,14 @@ spec:
           args:
             - --tls-cert-file=/tls/tls.crt
             - --tls-private-key-file=/tls/tls.key
+          {{- if .Values.mindns.tokenSecretRef.name }}
           env:
-            {{- if .Values.mindns.tokenSecretRef.name }}
             - name: MINDNS_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.mindns.tokenSecretRef.name }}
                   key: {{ .Values.mindns.tokenSecretRef.key | default "token" }}
-            {{- else if .Values.mindns.token }}
-            - name: MINDNS_TOKEN
-              value: {{ .Values.mindns.token | quote }}
-            {{- end }}
+          {{- end }}
           ports:
             - name: https
               containerPort: 443
