@@ -1,7 +1,7 @@
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
-  name: v1alpha1.{{ .Values.groupName }}
+  name: v1alpha1.{{ include "mindns-webhook.groupName" . }}
   labels:
     app: {{ include "mindns-webhook.name" . }}
     chart: {{ include "mindns-webhook.chart" . }}
@@ -10,7 +10,7 @@ metadata:
   annotations:
     cert-manager.io/inject-ca-from: "{{ .Release.Namespace }}/{{ include "mindns-webhook.servingCertificate" . }}"
 spec:
-  group: {{ .Values.groupName }}
+  group: {{ include "mindns-webhook.groupName" . }}
   groupPriorityMinimum: 1000
   versionPriority: 15
   service:

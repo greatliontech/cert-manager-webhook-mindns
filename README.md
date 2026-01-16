@@ -1,63 +1,64 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/cert-manager/cert-manager/d53c0b9270f8cd90d908460d69502694e1838f5f/logo/logo-small.png" height="256" width="256" alt="cert-manager project logo" />
-</p>
+# cert-manager-webhook-mindns
 
-# ACME webhook example
+A [cert-manager](https://cert-manager.io/) webhook solver for [mindns](https://github.com/greatliontech/mindns).
 
-The ACME issuer type supports an optional 'webhook' solver, which can be used
-to implement custom DNS01 challenge solving logic.
+## Installation
 
-This is useful if you need to use cert-manager with a DNS provider that is not
-officially supported in cert-manager core.
-
-## Why not in core?
-
-As the project & adoption has grown, there has been an influx of DNS provider
-pull requests to our core codebase. As this number has grown, the test matrix
-has become un-maintainable and so, it's not possible for us to certify that
-providers work to a sufficient level.
-
-By creating this 'interface' between cert-manager and DNS providers, we allow
-users to quickly iterate and test out new integrations, and then packaging
-those up themselves as 'extensions' to cert-manager.
-
-We can also then provide a standardised 'testing framework', or set of
-conformance tests, which allow us to validate that a DNS provider works as
-expected.
-
-## Creating your own webhook
-
-Webhook's themselves are deployed as Kubernetes API services, in order to allow
-administrators to restrict access to webhooks with Kubernetes RBAC.
-
-This is important, as otherwise it'd be possible for anyone with access to your
-webhook to complete ACME challenge validations and obtain certificates.
-
-To make the set up of these webhook's easier, we provide a template repository
-that can be used to get started quickly.
-
-When implementing your webhook, you should set the `groupName` in the
-[values.yml](deploy/example-webhook/values.yaml) of your chart to a domain name that 
-you - as the webhook-author - own. It should not need to be adjusted by the users of
-your chart.
-
-### Creating your own repository
-
-### Running the test suite
-
-All DNS providers **must** run the DNS01 provider conformance testing suite,
-else they will have undetermined behaviour when used with cert-manager.
-
-**It is essential that you configure and run the test suite when creating a
-DNS01 webhook.**
-
-An example Go test file has been provided in [main_test.go](https://github.com/cert-manager/webhook-example/blob/master/main_test.go).
-
-You can run the test suite with:
+### Helm
 
 ```bash
-$ TEST_ZONE_NAME=example.com. make test
+helm install mindns-webhook oci://ghcr.io/greatliontech/mindns-webhook-helm-chart \
+  --namespace cert-manager
 ```
 
-The example file has a number of areas you must fill in and replace with your
-own options in order for tests to pass.
+### Configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `image.repository` | Image repository | `ghcr.io/greatliontech/cert-manager-webhook-mindns` |
+| `image.tag` | Image tag | `latest` |
+| `mindns.token` | Bearer token for mindns authentication | `""` |
+| `mindns.tokenSecretRef.name` | Secret name containing the token | `""` |
+| `mindns.tokenSecretRef.key` | Key in secret containing the token | `token` |
+
+## Usage
+
+Create a `ClusterIssuer` or `Issuer` that references the webhook:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: you@example.com
+    privateKeySecretRef:
+      name: letsencrypt-account-key
+    solvers:
+      - dns01:
+          webhook:
+            groupName: acme.greatlion.tech
+            solverName: mindns
+            config:
+              serverAddr: "mindns.default.svc:50051"
+              # zone: "example.com."  # optional, derived from challenge if omitted
+              # token: "secret"       # optional, can also use MINDNS_TOKEN env var
+```
+
+## Development
+
+Requires [Task](https://taskfile.dev/).
+
+```bash
+task build      # Build binary
+task test       # Run tests
+task lint       # Run linter
+task docker-build TAG=v1.0.0  # Build Docker image
+task helm-lint  # Lint Helm chart
+```
+
+## License
+
+Apache 2.0

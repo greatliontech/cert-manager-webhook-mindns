@@ -29,8 +29,6 @@ spec:
             - --tls-cert-file=/tls/tls.crt
             - --tls-private-key-file=/tls/tls.key
           env:
-            - name: GROUP_NAME
-              value: {{ .Values.groupName | quote }}
             {{- if .Values.mindns.tokenSecretRef.name }}
             - name: MINDNS_TOKEN
               valueFrom:

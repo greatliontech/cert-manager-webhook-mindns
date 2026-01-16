@@ -1,5 +1,13 @@
 {{/* vim: set filetype=mustache: */}}
 {{/*
+The API group name for webhook registration.
+This must match the GroupName constant in main.go.
+*/}}
+{{- define "mindns-webhook.groupName" -}}
+acme.greatlion.tech
+{{- end -}}
+
+{{/*
 Expand the name of the chart.
 */}}
 {{- define "mindns-webhook.name" -}}

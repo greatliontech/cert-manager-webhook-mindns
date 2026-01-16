@@ -35,13 +35,9 @@ func (b bearerAuth) RequireTransportSecurity() bool {
 	return false
 }
 
-var GroupName = os.Getenv("GROUP_NAME")
+const GroupName = "acme.greatlion.tech"
 
 func main() {
-	if GroupName == "" {
-		panic("GROUP_NAME must be specified")
-	}
-
 	cmd.RunWebhookServer(GroupName, &mindnsSolver{})
 }
 

@@ -1,8 +1,3 @@
-# The groupName is used to avoid naming conflicts on the Kubernetes API.
-# Set this to a unique domain that you own.
-# This name will be referenced in each Issuer's `webhook` stanza.
-groupName: acme.example.com
-
 certManager:
   namespace: cert-manager
   serviceAccountName: cert-manager

@@ -65,7 +65,7 @@ metadata:
     heritage: {{ .Release.Service }}
 rules:
   - apiGroups:
-      - {{ .Values.groupName }}
+      - {{ include "mindns-webhook.groupName" . }}
     resources:
       - '*'
     verbs:
