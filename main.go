@@ -19,7 +19,7 @@ import (
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
-	"github.com/greatliontech/mindns/pkg/mindnspb"
+	"github.com/greatliontech/mindns/pkg/mindns"
 )
 
 // bearerAuth implements grpc.PerRPCCredentials for bearer token authentication.
